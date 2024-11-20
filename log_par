@@ -1,0 +1,136 @@
+import os
+import re
+import json
+import base64
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+class IoTLogParser:
+    def __init__(self, log_file):
+        self.log_file = log_file
+        self.data = []
+        self.errors = []
+        self.unrecognized_lines = []
+
+    def validate_file(self):
+        while not os.path.isfile(self.log_file):
+            print(f"File not found: {self.log_file}")
+            self.log_file = input("Enter the correct file path: ").strip()
+
+    def parse_logs(self):
+        self.validate_file()
+        with open(self.log_file, 'r') as file:
+            for line_num, line in enumerate(file, start=1):
+                try:
+                    if self.is_base64_image(line):
+                        self.decode_and_save_image(line, line_num)
+                    elif self.is_web_server_log(line):
+                        self.parse_web_server_log(line, line_num)
+                    else:
+                        self.parse_key_value_or_json_line(line, line_num)
+                except Exception as e:
+                    self.errors.append(f"Error at line {line_num}: {e}")
+
+    def parse_key_value_or_json_line(self, line, line_num):
+        try:
+            if line.strip().startswith("{") and line.strip().endswith("}"):
+                parsed_data = json.loads(line.strip())
+                self.data.append(parsed_data)
+            else:
+                pattern = r'(\w+)=([^\s,]+)'
+                matches = re.findall(pattern, line)
+                if matches:
+                    parsed_data = {key: self.cast_value(value) for key, value in matches}
+                    self.data.append(parsed_data)
+                else:
+                    self.unrecognized_lines.append((line_num, line.strip()))
+        except json.JSONDecodeError as e:
+            self.errors.append(f"JSON parsing error at line {line_num}: {e}")
+        except Exception as e:
+            self.errors.append(f"Key-value parsing error at line {line_num}: {e}")
+
+    def is_base64_image(self, line):
+        return re.match(r'^data:image/\w+;base64,', line.strip()) is not None
+
+    def decode_and_save_image(self, line, line_num):
+        try:
+            header, encoded_data = line.strip().split(",", 1)
+            image_format = header.split('/')[1].split(';')[0]
+            image_data = base64.b64decode(encoded_data)
+            image_file = f'image_{line_num}.{image_format}'
+            with open(image_file, 'wb') as img_file:
+                img_file.write(image_data)
+            print(f"Image saved: {image_file}")
+        except Exception as e:
+            self.errors.append(f"Image decoding error at line {line_num}: {e}")
+
+    def is_web_server_log(self, line):
+        return re.match(r'^\d{1,3}(\.\d{1,3}){3} - - \[.*\] ".*"', line.strip()) is not None
+
+    def parse_web_server_log(self, line, line_num):
+        try:
+            pattern = r'(?P<ip>\d{1,3}(\.\d{1,3}){3}) - - \[(?P<datetime>.+?)\] "(?P<request>.+?)" (?P<status>\d+) (?P<size>\d+)'
+            match = re.match(pattern, line.strip())
+            if match:
+                parsed_data = match.groupdict()
+                parsed_data['datetime'] = datetime.strptime(parsed_data['datetime'], "%d/%b/%Y:%H:%M:%S %z")
+                parsed_data['status'] = int(parsed_data['status'])
+                parsed_data['size'] = int(parsed_data['size'])
+                self.data.append(parsed_data)
+        except Exception as e:
+            self.errors.append(f"Web server log parsing error at line {line_num}: {e}")
+
+    def cast_value(self, value):
+        if value.lower() == 'null':
+            return None
+        elif value.isdigit():
+            return int(value)
+        try:
+            return float(value)
+        except ValueError:
+            if value.lower() in ['true', 'false']:
+                return value.lower() == 'true'
+            return value
+
+    def visualize_data(self):
+        df = pd.DataFrame(self.data)
+        if not df.empty:
+            print(df.head())
+            for column in df.select_dtypes(include='number').columns:
+                plt.figure(figsize=(10, 6))
+                plt.hist(df[column].dropna(), bins=20, color='skyblue', edgecolor='black')
+                plt.title(f'Distribution of {column}')
+                plt.xlabel(column)
+                plt.ylabel('Frequency')
+                plt.show()
+        else:
+            print("No data to visualize.")
+
+    def save_data(self, output_file="parsed_data.csv"):
+        df = pd.DataFrame(self.data)
+        if not df.empty:
+            df.to_csv(output_file, index=False)
+            print(f"Data saved to {output_file}")
+        else:
+            print("No data to save.")
+
+    def save_unrecognized_lines(self, output_file="unrecognized_lines.log"):
+        if self.unrecognized_lines:
+            with open(output_file, "w") as file:
+                for line_num, line in self.unrecognized_lines:
+                    file.write(f"Line {line_num}: {line}\n")
+            print(f"Unrecognized lines saved to {output_file}")
+
+if __name__ == "__main__":
+    log_file_path = input("Enter the log file path: ").strip()
+    log_parser = IoTLogParser(log_file_path)
+    log_parser.parse_logs()
+    log_parser.save_data()
+    log_parser.visualize_data()
+    log_parser.save_unrecognized_lines()
+    if log_parser.errors:
+        with open("parsing_errors.log", "w") as error_file:
+            for error in log_parser.errors:
+                error_file.write(f"{error}\n")
+        print("\nErrors encountered and saved to parsing_errors.log")
